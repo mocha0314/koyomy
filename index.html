@@ -126,17 +126,6 @@ async function initData(){
   return normalizeData(d);
 }
 
-// ── 起動処理 ──────────────────────────────────────────────
-const savedUser = localStorage.getItem("koyomy_user");
-if(savedUser === "A" || savedUser === "B"){
-  initData().then(data => {
-    setState({page:"cal", me:savedUser, data, ready:true});
-    startSync();
-  });
-} else {
-  setState({ready:true});
-}
-
 // ── データ操作 ────────────────────────────────────────────
 async function saveData(next){
   await dbSave(next);
@@ -798,7 +787,18 @@ function renderModal(me, td){
   overlay.appendChild(sheet);
   return overlay;
 }
-
+  
+// ── 起動処理 ──────────────────────────────────────────────
+const savedUser = localStorage.getItem("koyomy_user");
+if(savedUser === "A" || savedUser === "B"){
+  initData().then(data => {
+    setState({page:"cal", me:savedUser, data, ready:true});
+    startSync();
+  });
+} else {
+  setState({ready:true});
+}
+  
 // 初回レンダリング
 render();
 </script>
