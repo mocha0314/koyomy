@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="koyomy" />
+  <title>koyomy</title>
+  <style>
+    *{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body{ background: #FAF7F2; font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif; }
+    button{ font-family: inherit; }
+    input, textarea{ font-family: inherit; font-size: 16px; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, onValue, set, get } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ── Firebase設定 ─────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyByo9ik9QTRFW-lIfdaEZlfKtz0vmjkp8A",
+  authDomain: "mocha-nacha.firebaseapp.com",
+  databaseURL: "https://mocha-nacha-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "mocha-nacha",
+  storageBucket: "mocha-nacha.firebasestorage.app",
+  messagingSenderId: "817066918395",
+  appId: "1:817066918395:web:da9ebe0c392a30d26f8b5e"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db    = getDatabase(fbApp);
+const ROOT  = "koyomy";
+
+async function dbLoad(){
+  const snap = await get(ref(db, ROOT));
+  return snap.exists() ? snap.val() : null;
+}
+async function dbSave(data){
+  await set(ref(db, ROOT), data);
+}
+function dbListen(cb){
+  return onValue(ref(db, ROOT), snap => {
+    if(snap.exists()) cb(snap.val());
+  });
+}
+
+// ── 定数 ─────────────────────────────────────────────────
+const BG       = "#FAF7F2";
+const CARD     = "#FFFFFF";
+const BORDER   = "#EDE8E0";
+const TEXT     = "#5C4A3A";
+const MUTED    = "#A89A8A";
+const EV_COLOR  = { A:"#E8847A", B:"#7AB3D4" };
+const HOL_COLOR = { A:"#F28C3A", B:"#4AAF7A" };
+const USERS = {
+  A:{ name:"もちゃ", main:"#E8847A", light:"#FDECEA" },
+  B:{ name:"なちゃ", main:"#7AB3D4", light:"#E8F3FA" },
+};
+const DAYS    = ["日","月","火","水","木","金","土"];
+const MONTHS  = ["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+const HOLIDAYS = {
+  "01-01":"元日","01-08":"成人の日","02-11":"建国記念日","02-23":"天皇誕生日",
+  "03-20":"春分の日","04-29":"昭和の日","05-03":"憲法記念日","05-04":"みどりの日",
+  "05-05":"こどもの日","07-21":"海の日","08-11":"山の日","09-15":"敬老の日",
+  "09-23":"秋分の日","10-13":"スポーツの日","11-03":"文化の日","11-23":"勤労感謝の日",
+};
+
+function holiday(m,d){ return HOLIDAYS[`${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`]||null; }
+function toISO(y,m,d){ return `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`; }
+function daysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
+function startDow(y,m){ return new Date(y,m,1).getDay(); }
+function todayObj(){ const t=new Date(); return {y:t.getFullYear(),m:t.getMonth(),d:t.getDate()}; }
+function cmp(a,b){ return a<b?-1:a>b?1:0; }
+function weekOf(y,m,d){
+  const dt=new Date(y,m,d); dt.setDate(dt.getDate()-dt.getDay());
+  return Array.from({length:7},(_,i)=>{ const x=new Date(dt); x.setDate(dt.getDate()+i); return {y:x.getFullYear(),m:x.getMonth(),d:x.getDate()}; });
+}
+
+// ── 状態管理 ──────────────────────────────────────────────
+let state = {
+  page: "home",   // home | cal
+  me: "A",
+  data: { events:{}, holidays:{}, beers:{}, board:[] },
+  view: "month",  // month | week
+  cur: todayObj(),
+  modal: null,    // null | {iso}
+  addMode: false,
+  editEv: null,
+  form: {},
+  toast: "",
+  bbText: "",
+  ready: false,
+};
+let unsubscribe = null;
+
+function setState(patch){
+  state = {...state, ...patch};
+  render();
+}
+
+// ── Firebase同期 ───────────────────────────────────────────
+function startSync(){
+  if(unsubscribe) unsubscribe();
+  unsubscribe = dbListen(data => {
+    // eventsがオブジェクトの場合配列に変換
+    const normalized = normalizeData(data);
+    setState({data: normalized});
+  });
+}
+function normalizeData(raw){
+  if(!raw) return {events:[],holidays:{},beers:{},board:[]};
+  return {
+    events:   Array.isArray(raw.events)   ? raw.events   : Object.values(raw.events||{}),
+    holidays: raw.holidays || {},
+    beers:    raw.beers    || {},
+    board:    Array.isArray(raw.board)    ? raw.board    : Object.values(raw.board||{}),
+  };
+}
+async function initData(){
+  let d = await dbLoad();
+  if(!d){ d={events:[],holidays:{},beers:{},board:[]}; await dbSave(d); }
+  return normalizeData(d);
+}
+
+// ── 起動処理 ──────────────────────────────────────────────
+const savedUser = localStorage.getItem("koyomy_user");
+if(savedUser === "A" || savedUser === "B"){
+  initData().then(data => {
+    setState({page:"cal", me:savedUser, data, ready:true});
+    startSync();
+  });
+} else {
+  setState({ready:true});
+}
+
+// ── データ操作 ────────────────────────────────────────────
+async function saveData(next){
+  await dbSave(next);
+  setState({data: normalizeData(next)});
+}
+
+async function addEvent(form, me){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  n.events.push({
+    id: Date.now()+"_"+Math.random().toString(36).slice(2,6),
+    user: me,
+    title: form.title.trim(),
+    start: form.start,
+    end:   form.end || form.start,
+    allDay: form.allDay,
+    t1: form.allDay ? "" : form.t1,
+    t2: form.allDay ? "" : form.t2,
+    memo: form.memo,
+    color: EV_COLOR[me],
+  });
+  await dbSave(n);
+}
+async function updateEvent(id, form){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  const i = n.events.findIndex(e=>e.id===id);
+  if(i>=0) n.events[i] = {...n.events[i], title:form.title.trim(), start:form.start,
+    end:form.end||form.start, allDay:form.allDay,
+    t1:form.allDay?"":form.t1, t2:form.allDay?"":form.t2, memo:form.memo};
+  await dbSave(n);
+}
+async function deleteEvent(id){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  n.events = n.events.filter(e=>e.id!==id);
+  await dbSave(n);
+}
+async function toggleHoliday(iso, me){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  const cur = n.holidays[iso] || [];
+  n.holidays[iso] = cur.includes(me) ? cur.filter(u=>u!==me) : [...cur, me];
+  if(n.holidays[iso].length===0) delete n.holidays[iso];
+  await dbSave(n);
+}
+async function toggleBeer(iso, me){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  const cur = n.beers[iso] || [];
+  n.beers[iso] = cur.includes(me) ? cur.filter(u=>u!==me) : [...cur, me];
+  if(n.beers[iso].length===0) delete n.beers[iso];
+  await dbSave(n);
+}
+async function postBoard(text, me){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  n.board.push({
+    id: Date.now()+"",
+    user: me,
+    text: text.trim(),
+    at: new Date().toLocaleString("ja-JP",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}),
+  });
+  await dbSave(n);
+}
+async function deletePost(id){
+  const d = await dbLoad();
+  const n = normalizeData(d);
+  n.board = n.board.filter(b=>b.id!==id);
+  await dbSave(n);
+}
+
+// ── ヘルパー ──────────────────────────────────────────────
+function evsOn(iso){
+  return (state.data.events||[]).filter(e=>cmp(e.start,iso)<=0&&cmp(iso,e.end||e.start)<=0);
+}
+function holsOn(iso){ return (state.data.holidays||{})[iso]||[]; }
+function beersOn(iso){ return (state.data.beers||{})[iso]||[]; }
+function showToast(msg){ setState({toast:msg}); setTimeout(()=>setState({toast:""}),2000); }
+function nav(dir){
+  const{y,m,d}=state.cur;
+  if(state.view==="month"){
+    let nm=m+dir, ny=y;
+    if(nm<0){nm=11;ny--;} if(nm>11){nm=0;ny++;}
+    setState({cur:{y:ny,m:nm,d:1}});
+  } else {
+    const dt=new Date(y,m,d+dir*7);
+    setState({cur:{y:dt.getFullYear(),m:dt.getMonth(),d:dt.getDate()}});
+  }
+}
+
+// ── UI生成ヘルパー ────────────────────────────────────────
+function el(tag, attrs={}, ...children){
+  const e = document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs)){
+    if(k==="style"&&typeof v==="object") Object.assign(e.style,v);
+    else if(k.startsWith("on")&&typeof v==="function") e.addEventListener(k.slice(2).toLowerCase(),v);
+    else if(k==="className") e.className=v;
+    else e.setAttribute(k,v);
+  }
+  for(const c of children){
+    if(c==null||c===false) continue;
+    e.appendChild(typeof c==="string"?document.createTextNode(c):c);
+  }
+  return e;
+}
+function div(style,...children){ return el("div",{style},...children); }
+function btn(style,text,onClick){ return el("button",{style,onClick:onClick},text); }
+function inp(style,attrs){ return el("input",{style,...attrs}); }
+function span(style,...children){ return el("span",{style},...children); }
+function p(style,...children){ return el("p",{style},...children); }
+
+// ── スタイル定数 ──────────────────────────────────────────
+const S = {
+  page:      {minHeight:"100vh", background:BG, paddingBottom:"40px"},
+  card:      {background:CARD, borderRadius:"16px", boxShadow:"0 2px 16px rgba(92,74,58,0.08)", padding:"20px"},
+  header:    {position:"sticky", top:"0", zIndex:"10", background:"rgba(250,247,242,0.96)", backdropFilter:"blur(16px)", padding:"12px 16px 10px", borderBottom:`1px solid ${BORDER}`},
+  overlay:   {position:"fixed", inset:"0", background:"rgba(60,40,20,0.32)", zIndex:"100", display:"flex", alignItems:"flex-end", justifyContent:"center"},
+  sheet:     {background:BG, borderRadius:"22px 22px 0 0", padding:"8px 20px 44px", width:"100%", maxWidth:"480px", maxHeight:"90vh", overflowY:"auto", boxShadow:"0 -6px 32px rgba(0,0,0,0.12)"},
+  fIn:       {width:"100%", padding:"11px 12px", borderRadius:"10px", border:`1.5px solid ${BORDER}`, background:BG, fontSize:"16px", color:TEXT, outline:"none"},
+  fTa:       {width:"100%", padding:"11px 12px", borderRadius:"10px", border:`1.5px solid ${BORDER}`, background:BG, fontSize:"16px", color:TEXT, outline:"none", minHeight:"60px", resize:"vertical"},
+};
+
+// ── レンダリング ──────────────────────────────────────────
+function render(){
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+  if(!state.ready){ app.appendChild(div({...S.page})); return; }
+  if(state.page==="home"){ app.appendChild(renderHome()); return; }
+  app.appendChild(renderCal());
+}
+
+// ── ホーム画面 ────────────────────────────────────────────
+function renderHome(){
+  return div({...S.page, display:"flex", alignItems:"center", justifyContent:"center", minHeight:"100vh"},
+    div({width:"100%", maxWidth:"360px", padding:"0 24px"},
+      div({textAlign:"center", marginBottom:"40px"},
+        el("h1",{style:{fontSize:"34px", fontWeight:"800", color:TEXT, marginBottom:"8px", letterSpacing:"0.5px"}},"koyomy"),
+        p({color:MUTED, fontSize:"13px"},"もちゃ と なちゃ の共有カレンダー"),
+      ),
+      div({...S.card, borderRadius:"20px", padding:"28px"},
+        p({fontSize:"13px", fontWeight:"700", color:TEXT, textAlign:"center", marginBottom:"20px"},"あなたはどちらですか？"),
+        div({display:"flex", flexDirection:"column", gap:"12px"},
+          btn({width:"100%", padding:"18px", borderRadius:"14px", border:`2px solid ${USERS.A.main}`,
+            background:USERS.A.light, color:USERS.A.main, fontWeight:"800", fontSize:"18px", cursor:"pointer"},
+            "もちゃ", async ()=>{
+              localStorage.setItem("koyomy_user","A");
+              const data = await initData();
+              setState({page:"cal", me:"A", data, ready:true});
+              startSync();
+            }),
+          btn({width:"100%", padding:"18px", borderRadius:"14px", border:`2px solid ${USERS.B.main}`,
+            background:USERS.B.light, color:USERS.B.main, fontWeight:"800", fontSize:"18px", cursor:"pointer"},
+            "なちゃ", async ()=>{
+              localStorage.setItem("koyomy_user","B");
+              const data = await initData();
+              setState({page:"cal", me:"B", data, ready:true});
+              startSync();
+            }),
+        ),
+      ),
+    ),
+  );
+}
+
+// ── カレンダー画面 ────────────────────────────────────────
+function renderCal(){
+  const {me, view, cur, data} = state;
+  const U = USERS[me];
+  const {y,m,d} = cur;
+  const td = todayObj();
+  const wd = weekOf(y,m,d);
+
+  const wrap = div({...S.page});
+
+  // Header
+  const header = div({...S.header},
+    div({display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"10px"},
+      el("h1",{style:{fontSize:"20px", fontWeight:"800", color:TEXT, letterSpacing:"0.5px"}},"koyomy"),
+      div({display:"flex", alignItems:"center", gap:"6px"},
+        div({background:U.light, color:U.main, borderRadius:"20px", padding:"7px 14px", fontSize:"12px", fontWeight:"700", display:"flex", alignItems:"center", gap:"6px"},
+          span({width:"8px", height:"8px", borderRadius:"50%", background:U.main, display:"inline-block"}),
+          U.name,
+        ),
+        btn({background:BORDER, border:"none", borderRadius:"8px", padding:"6px 8px", fontSize:"10px", color:MUTED, cursor:"pointer", fontWeight:"600"},
+          "切替", ()=>{
+            localStorage.removeItem("koyomy_user");
+            if(unsubscribe) unsubscribe();
+            setState({page:"home"});
+          }),
+      ),
+    ),
+    div({display:"flex", alignItems:"center", justifyContent:"space-between"},
+      div({display:"flex", background:BORDER, borderRadius:"10px", padding:"3px", gap:"2px"},
+        ...["month","week"].map(v=>
+          btn({padding:"6px 14px", borderRadius:"8px", border:"none", fontSize:"12px", fontWeight:"700", cursor:"pointer",
+            background:view===v?U.main:"transparent", color:view===v?"#fff":MUTED},
+            v==="month"?"月":"週", ()=>setState({view:v}))
+        ),
+      ),
+      div({display:"flex", alignItems:"center", gap:"2px"},
+        btn({background:"none", border:"none", fontSize:"22px", cursor:"pointer", color:U.main, padding:"0 6px", fontWeight:"800"},"‹",()=>nav(-1)),
+        span({fontWeight:"700", fontSize:"14px", color:TEXT, minWidth:"110px", textAlign:"center"},
+          `${y}年 ${MONTHS[m]}${view==="week"?` 第${Math.ceil(d/7)}週`:""}`),
+        btn({background:"none", border:"none", fontSize:"22px", cursor:"pointer", color:U.main, padding:"0 6px", fontWeight:"800"},"›",()=>nav(1)),
+      ),
+    ),
+  );
+  wrap.appendChild(header);
+
+  // Calendar body
+  const body = div({padding:"10px 8px 4px"});
+  body.appendChild(view==="month" ? renderMonth(y,m,td) : renderWeek(wd,td));
+  wrap.appendChild(body);
+
+  // Legend
+  const legend = div({background:CARD, margin:"0 8px", borderRadius:"12px", padding:"8px 14px",
+    display:"flex", alignItems:"center", gap:"12px", flexWrap:"wrap",
+    boxShadow:"0 1px 4px rgba(0,0,0,0.04)"});
+  ["A","B"].forEach(u=>{
+    legend.appendChild(div({display:"flex", alignItems:"center", gap:"5px"},
+      span({width:"8px", height:"8px", borderRadius:"50%", background:USERS[u].main, display:"inline-block"}),
+      span({fontSize:"11px", color:MUTED}, USERS[u].name),
+    ));
+  });
+  legend.appendChild(div({display:"flex", alignItems:"center", gap:"4px"},
+    span({fontSize:"10px", fontWeight:"800", color:"#cc0000", background:"#fff0f0", borderRadius:"3px", padding:"0 4px"},"祝"),
+    span({fontSize:"11px", color:MUTED},"祝日"),
+  ));
+  legend.appendChild(span({fontSize:"10px", color:BORDER, marginLeft:"auto"},"リアルタイム同期"));
+  wrap.appendChild(legend);
+
+  // Board
+  wrap.appendChild(renderBoard(me));
+
+  // Modal
+  if(state.modal) wrap.appendChild(renderModal(me, td));
+
+  // Toast
+  if(state.toast){
+    wrap.appendChild(div({
+      position:"fixed", bottom:"80px", left:"50%", transform:"translateX(-50%)",
+      background:TEXT, color:BG, padding:"11px 22px", borderRadius:"22px",
+      fontSize:"13px", fontWeight:"700", zIndex:"200", whiteSpace:"nowrap",
+    }, state.toast));
+  }
+
+  return wrap;
+}
+
+// ── 月表示 ────────────────────────────────────────────────
+function renderMonth(y,m,td){
+  const total=daysInMonth(y,m), st=startDow(y,m);
+  const grid = div({display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:"2px"});
+
+  // 曜日ヘッダー
+  DAYS.forEach((d,i)=>{
+    grid.appendChild(span({textAlign:"center", fontSize:"11px", fontWeight:"700", padding:"5px 0", display:"block",
+      color:i===0?USERS.A.main:i===6?USERS.B.main:MUTED}, d));
+  });
+
+  // 空白
+  for(let i=0;i<st;i++) grid.appendChild(div({}));
+
+  // 日付セル
+  for(let day=1;day<=total;day++){
+    const iso = toISO(y,m,day);
+    const evs = evsOn(iso);
+    const hols = holsOn(iso);
+    const beers = beersOn(iso);
+    const isToday = td.y===y&&td.m===m&&td.d===day;
+    const hol = holiday(m,day);
+    const holA=hols.includes("A"), holB=hols.includes("B"), both=holA&&holB;
+
+    let cellBg = CARD;
+    let border = "1.5px solid transparent";
+    let bgImage = "none";
+
+    if(both){
+      bgImage = `linear-gradient(${CARD},${CARD}),linear-gradient(to bottom right,${HOL_COLOR.A} 50%,${HOL_COLOR.B} 50%)`;
+      border = "2.5px solid transparent";
+    } else if(holA){ cellBg=USERS.A.light; border=`2.5px solid ${HOL_COLOR.A}`; }
+    else if(holB)  { cellBg=USERS.B.light; border=`2.5px solid ${HOL_COLOR.B}`; }
+    else if(isToday){ border=`2px solid ${USERS.A.main}`; }
+
+    const cell = div({
+      minHeight:"68px", borderRadius:"10px", padding:"5px 4px", cursor:"pointer",
+      background:cellBg, border, boxSizing:"border-box",
+      backgroundImage: both?bgImage:"none",
+      backgroundOrigin: both?"border-box":"initial",
+      backgroundClip: both?"padding-box,border-box":"initial",
+      boxShadow: isToday?"0 2px 10px rgba(232,132,122,0.2)":"0 1px 3px rgba(0,0,0,0.04)",
+    });
+    cell.addEventListener("click",()=>{
+      setState({modal:{iso}, addMode:false, editEv:null, form:{title:"",start:iso,end:iso,allDay:true,t1:"",t2:"",memo:""}});
+    });
+
+    // 日付行
+    const topRow = div({display:"flex", alignItems:"center", gap:"2px", marginBottom:"2px"});
+    topRow.appendChild(span({fontSize:"12px", fontWeight:"700",
+      color:hol?"#cc0000":isToday?USERS.A.main:TEXT}, String(day)));
+    if(hol) topRow.appendChild(span({fontSize:"8px", fontWeight:"800", color:"#cc0000", background:"#fff0f0", borderRadius:"3px", padding:"0 3px"},"祝"));
+    // ビールスタンプ
+    if(beers.length>0){
+      const beerSpan = span({marginLeft:"auto", display:"flex", gap:"1px"});
+      beers.forEach(()=> beerSpan.appendChild(span({fontSize:"10px"},"🍺")));
+      topRow.appendChild(beerSpan);
+    }
+    cell.appendChild(topRow);
+
+    // 祝日名
+    if(hol) cell.appendChild(div({fontSize:"7px", color:"#cc0000", fontWeight:"700", lineHeight:"1.2",
+      overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", marginBottom:"1px"}, hol));
+
+    // 予定ピル
+    evs.slice(0,2).forEach(e=>{
+      const pill = div({borderRadius:"3px", padding:"1px 4px", marginBottom:"2px",
+        background:EV_COLOR[e.user]+"28", borderLeft:`2px solid ${EV_COLOR[e.user]}`, overflow:"hidden"});
+      pill.appendChild(span({fontSize:"9px", color:EV_COLOR[e.user], fontWeight:"700",
+        whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis", display:"block"}, e.title));
+      cell.appendChild(pill);
+    });
+    if(evs.length>2) cell.appendChild(div({fontSize:"9px", color:MUTED, paddingLeft:"3px"}, `+${evs.length-2}`));
+
+    grid.appendChild(cell);
+  }
+  return grid;
+}
+
+// ── 週表示 ────────────────────────────────────────────────
+function renderWeek(wd, td){
+  const wrap = div({display:"flex", flexDirection:"column", gap:"4px"});
+  wd.forEach(({y,m,d},i)=>{
+    const iso = toISO(y,m,d);
+    const evs = evsOn(iso);
+    const hols = holsOn(iso);
+    const beers = beersOn(iso);
+    const isToday = td.y===y&&td.m===m&&td.d===d;
+    const hol = holiday(m,d);
+    const holA=hols.includes("A"), holB=hols.includes("B"), both=holA&&holB;
+
+    let rowBorder = `1.5px solid ${BORDER}`;
+    let rowBgImg = "none";
+    let leftBg = BG;
+
+    if(both){
+      rowBorder = "2.5px solid transparent";
+      rowBgImg = `linear-gradient(${CARD},${CARD}),linear-gradient(to right,${HOL_COLOR.A} 50%,${HOL_COLOR.B} 50%)`;
+      leftBg = `linear-gradient(to bottom,${USERS.A.light} 50%,${USERS.B.light} 50%)`;
+    } else if(holA){ rowBorder=`2.5px solid ${HOL_COLOR.A}`; leftBg=USERS.A.light; }
+    else if(holB)  { rowBorder=`2.5px solid ${HOL_COLOR.B}`; leftBg=USERS.B.light; }
+    else if(isToday){ rowBorder=`2px solid ${USERS.A.main}`; }
+
+    const row = div({display:"flex", background:CARD, borderRadius:"12px", overflow:"hidden",
+      border:rowBorder, backgroundImage:both?rowBgImg:"none",
+      backgroundOrigin:both?"border-box":"initial", backgroundClip:both?"padding-box,border-box":"initial",
+      boxShadow:isToday?"0 2px 10px rgba(232,132,122,0.15)":"0 1px 4px rgba(0,0,0,0.04)",
+      minHeight:"54px", boxSizing:"border-box"});
+
+    // 左：日付
+    const left = div({width:"50px", flexShrink:"0", display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center", padding:"6px 4px", cursor:"pointer",
+      background:leftBg, borderRight:`1px solid ${BORDER}`, gap:"1px"});
+    left.addEventListener("click",()=>{
+      setState({modal:{iso}, addMode:false, editEv:null, form:{title:"",start:iso,end:iso,allDay:true,t1:"",t2:"",memo:""}});
+    });
+    left.appendChild(span({fontSize:"10px", fontWeight:"800",
+      color:hol?"#cc0000":i===0?USERS.A.main:i===6?USERS.B.main:MUTED}, DAYS[i]));
+    left.appendChild(span({fontSize:"18px", fontWeight:"800", color:isToday?USERS.A.main:TEXT, lineHeight:"1"}, String(d)));
+    left.appendChild(span({fontSize:"8px", color:MUTED}, MONTHS[m]));
+    if(hol) left.appendChild(span({fontSize:"6px", color:"#cc0000", fontWeight:"800", textAlign:"center", lineHeight:"1.2"}, hol));
+    if(beers.length>0){
+      const bs = span({display:"flex", justifyContent:"center", gap:"0px"});
+      beers.forEach(()=> bs.appendChild(span({fontSize:"11px"},"🍺")));
+      left.appendChild(bs);
+    }
+    row.appendChild(left);
+
+    // 右：予定
+    const right = div({flex:"1", padding:"6px 8px", display:"flex", flexWrap:"wrap", gap:"4px", alignContent:"flex-start"});
+    evs.forEach(e=>{
+      const evEl = div({borderRadius:"7px", padding:"4px 8px", cursor:"pointer",
+        minWidth:"72px", flex:"1 0 72px", background:EV_COLOR[e.user]+"18", borderLeft:`3px solid ${EV_COLOR[e.user]}`});
+      evEl.addEventListener("click",()=>{
+        setState({modal:{iso}, addMode:true, editEv:e,
+          form:{title:e.title, start:e.start, end:e.end||e.start, allDay:e.allDay, t1:e.t1||"", t2:e.t2||"", memo:e.memo||""}});
+      });
+      if(!e.allDay&&e.t1) evEl.appendChild(div({fontSize:"10px", color:EV_COLOR[e.user], fontWeight:"700"}, e.t1));
+      evEl.appendChild(div({fontSize:"12px", fontWeight:"700", color:TEXT}, e.title));
+      right.appendChild(evEl);
+    });
+    if(evs.length===0){
+      const plus = div({flex:"1", display:"flex", alignItems:"center", justifyContent:"center", cursor:"pointer"});
+      plus.addEventListener("click",()=>{
+        setState({modal:{iso}, addMode:false, editEv:null, form:{title:"",start:iso,end:iso,allDay:true,t1:"",t2:"",memo:""}});
+      });
+      plus.appendChild(span({color:BORDER, fontSize:"22px"},"+"));
+      right.appendChild(plus);
+    } else {
+      const addBtn = btn({background:USERS.A.main, border:"none", borderRadius:"7px", color:"#fff",
+        fontSize:"14px", fontWeight:"800", width:"26px", height:"26px", cursor:"pointer", flexShrink:"0", alignSelf:"center"},
+        "+", ()=>{
+          setState({modal:{iso}, addMode:false, editEv:null, form:{title:"",start:iso,end:iso,allDay:true,t1:"",t2:"",memo:""}});
+        });
+      right.appendChild(addBtn);
+    }
+    row.appendChild(right);
+    wrap.appendChild(row);
+  });
+  return wrap;
+}
+
+// ── 掲示板 ────────────────────────────────────────────────
+function renderBoard(me){
+  const wrap = div({background:CARD, margin:"10px 8px 0", borderRadius:"16px", overflow:"hidden",
+    boxShadow:"0 2px 12px rgba(92,74,58,0.07)"});
+
+  wrap.appendChild(div({padding:"14px 16px 10px", borderBottom:`1px solid ${BORDER}`},
+    span({fontSize:"15px", fontWeight:"800", color:TEXT},"掲示板"),
+  ));
+
+  const list = div({maxHeight:"210px", overflowY:"auto", padding:"8px 14px"});
+  const board = [...(state.data.board||[])].reverse();
+  if(board.length===0){
+    list.appendChild(p({textAlign:"center", color:MUTED, fontSize:"13px", margin:"16px 0"},"まだ投稿がありません"));
+  }
+  board.forEach(b=>{
+    const post = div({background:USERS[b.user].light, borderRadius:"10px", padding:"10px 12px",
+      marginBottom:"8px", borderLeft:`3px solid ${USERS[b.user].main}`});
+    const inner = div({display:"flex", justifyContent:"space-between", alignItems:"flex-start"});
+    const content = div({flex:"1", minWidth:"0"});
+    const meta = div({display:"flex", alignItems:"center", gap:"6px", marginBottom:"4px"});
+    meta.appendChild(span({width:"7px", height:"7px", borderRadius:"50%", background:USERS[b.user].main, display:"inline-block", flexShrink:"0"}));
+    meta.appendChild(span({fontSize:"11px", fontWeight:"700", color:USERS[b.user].main}, USERS[b.user].name));
+    meta.appendChild(span({fontSize:"10px", color:MUTED}, b.at));
+    content.appendChild(meta);
+    const txt = p({fontSize:"13px", color:TEXT, lineHeight:"1.6", whiteSpace:"pre-wrap", wordBreak:"break-word", margin:"0"}, b.text);
+    content.appendChild(txt);
+    inner.appendChild(content);
+    if(b.user===me){
+      const del = btn({background:"none", border:"none", color:MUTED, fontSize:"14px", cursor:"pointer", padding:"0 0 0 8px", flexShrink:"0"},
+        "✕", async ()=>{ await deletePost(b.id); showToast("削除しました"); });
+      inner.appendChild(del);
+    }
+    post.appendChild(inner);
+    list.appendChild(post);
+  });
+  wrap.appendChild(list);
+
+  // 入力欄
+  const inputArea = div({display:"flex", gap:"8px", padding:"10px 14px", borderTop:`1px solid ${BORDER}`, alignItems:"flex-end"});
+  const ta = el("textarea",{style:{flex:"1", minWidth:"0", padding:"10px 12px", borderRadius:"12px",
+    border:`1.5px solid ${BORDER}`, background:BG, fontSize:"16px", color:TEXT,
+    outline:"none", resize:"none", lineHeight:"1.5", boxSizing:"border-box", fontFamily:"inherit"},
+    rows:"2", placeholder:"メッセージを入力…"});
+  ta.value = state.bbText;
+  ta.addEventListener("input", e=>{ state.bbText = e.target.value; });
+  inputArea.appendChild(ta);
+  inputArea.appendChild(btn({padding:"10px 16px", borderRadius:"12px", border:"none",
+    background:USERS[me].main, color:"#fff", fontWeight:"800", fontSize:"13px", cursor:"pointer", flexShrink:"0"},
+    "送信", async ()=>{
+      if(!state.bbText.trim()) return;
+      await postBoard(state.bbText, me);
+      state.bbText = "";
+      showToast("送信しました");
+    }));
+  wrap.appendChild(inputArea);
+  return wrap;
+}
+
+// ── 日付モーダル ──────────────────────────────────────────
+function renderModal(me, td){
+  const {modal, addMode, editEv, form} = state;
+  const iso = modal.iso;
+  const [,mm,dd] = iso.split("-");
+  const evs = evsOn(iso);
+  const hols = holsOn(iso);
+  const beers = beersOn(iso);
+  const U = USERS[me];
+
+  const overlay = div({...S.overlay});
+  overlay.addEventListener("click",()=>setState({modal:null, editEv:null, addMode:false}));
+
+  const sheet = div({...S.sheet});
+  sheet.addEventListener("click",e=>e.stopPropagation());
+
+  // ハンドル
+  sheet.appendChild(div({width:"40px", height:"4px", background:BORDER, borderRadius:"2px", margin:"0 auto 16px"}));
+
+  // タイトル行
+  const head = div({display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"14px"});
+  head.appendChild(span({fontSize:"15px", fontWeight:"800", color:TEXT}, `${parseInt(mm)}月${parseInt(dd)}日`));
+  head.appendChild(btn({background:BORDER, border:"none", borderRadius:"50%", width:"30px", height:"30px",
+    cursor:"pointer", fontSize:"14px", color:MUTED}, "✕",
+    ()=>setState({modal:null, editEv:null, addMode:false})));
+  sheet.appendChild(head);
+
+  // 休みボタン
+  const holRow = div({display:"flex", gap:"8px", marginBottom:"12px"});
+  ["A","B"].forEach(u=>{
+    const on = hols.includes(u);
+    const b = btn({flex:"1", padding:"10px", borderRadius:"10px",
+      border:`2px solid ${HOL_COLOR[u]}`,
+      background: on ? HOL_COLOR[u] : USERS[u].light,
+      color: on ? "#fff" : HOL_COLOR[u],
+      fontWeight:"700", fontSize:"13px",
+      cursor: u===me ? "pointer" : "default",
+      opacity: u===me ? "1" : "0.6"},
+      `${USERS[u].name}の休み${on?" ✓":""}`,
+      u===me ? async ()=>{ await toggleHoliday(iso, me); showToast(on?"休みを解除しました":"休みに設定しました"); } : ()=>{});
+    holRow.appendChild(b);
+  });
+  sheet.appendChild(holRow);
+
+  // ビールスタンプボタン
+  const beerOn = beers.includes(me);
+  const beerBtn = div({marginBottom:"14px"});
+  const beerB = btn({width:"100%", padding:"10px", borderRadius:"10px",
+    border:`2px solid ${beerOn?"#F5A623":BORDER}`,
+    background: beerOn ? "#FFF8EC" : "transparent",
+    color: beerOn ? "#D4880A" : MUTED,
+    fontWeight:"700", fontSize:"14px", cursor:"pointer",
+    display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"},
+    "", async ()=>{ await toggleBeer(iso, me); showToast(beerOn?"スタンプを外しました":"スタンプを押しました！"); });
+  beerB.appendChild(span({fontSize:"20px"},"🍺"));
+  beerB.appendChild(span({},beerOn?"飲み会スタンプ済み ✓":"飲み会スタンプを押す"));
+  beerBtn.appendChild(beerB);
+  if(beers.length>0){
+    const names = div({display:"flex", alignItems:"center", gap:"4px", marginTop:"6px", paddingLeft:"4px"});
+    beers.forEach(u=>{
+      names.appendChild(span({fontSize:"11px", color:USERS[u].main, fontWeight:"700",
+        background:USERS[u].light, borderRadius:"6px", padding:"2px 8px"}, `${USERS[u].name} 🍺`));
+    });
+    beerBtn.appendChild(names);
+  }
+  sheet.appendChild(beerBtn);
+
+  // 予定一覧
+  if(evs.length>0){
+    sheet.appendChild(p({fontSize:"11px", fontWeight:"700", color:MUTED, margin:"0 0 6px"},"この日の予定"));
+    evs.forEach(e=>{
+      const row = div({background:CARD, borderRadius:"10px", padding:"9px 12px", marginBottom:"6px",
+        borderLeft:`3px solid ${EV_COLOR[e.user]}`, display:"flex", alignItems:"flex-start", gap:"8px"});
+      const content = div({flex:"1", minWidth:"0"});
+      const titleRow = div({display:"flex", alignItems:"center", gap:"6px"});
+      titleRow.appendChild(span({width:"7px", height:"7px", borderRadius:"50%", background:USERS[e.user].main, display:"inline-block", flexShrink:"0"}));
+      titleRow.appendChild(span({fontSize:"13px", fontWeight:"700", color:TEXT}, e.title));
+      content.appendChild(titleRow);
+      if(!e.allDay&&e.t1) content.appendChild(span({fontSize:"11px", color:MUTED, marginLeft:"13px", display:"block"},
+        `${e.t1}${e.t2?` 〜 ${e.t2}`:""}`));
+      if(e.memo) content.appendChild(p({fontSize:"11px", color:MUTED, margin:"3px 0 0 13px"}, e.memo));
+      row.appendChild(content);
+      if(e.user===me){
+        row.appendChild(btn({background:U.light, border:"none", borderRadius:"7px", padding:"4px 10px",
+          fontSize:"11px", color:U.main, cursor:"pointer", fontWeight:"700", flexShrink:"0"},
+          "編集", ()=>{
+            setState({addMode:true, editEv:e,
+              form:{title:e.title, start:e.start, end:e.end||e.start, allDay:e.allDay, t1:e.t1||"", t2:e.t2||"", memo:e.memo||""}});
+          }));
+      }
+      sheet.appendChild(row);
+    });
+  } else if(!addMode){
+    sheet.appendChild(p({fontSize:"12px", color:MUTED, textAlign:"center", margin:"4px 0 12px"},"予定はありません"));
+  }
+
+  // 追加／編集フォーム
+  if(!addMode){
+    sheet.appendChild(btn({width:"100%", padding:"13px", borderRadius:"12px",
+      border:`2px dashed ${BORDER}`, background:"transparent", color:MUTED,
+      fontSize:"14px", fontWeight:"700", cursor:"pointer", boxSizing:"border-box"},
+      "予定を追加", ()=>setState({addMode:true})));
+  } else {
+    const formWrap = div({background:CARD, borderRadius:"14px", padding:"16px", boxSizing:"border-box"});
+    formWrap.appendChild(p({fontSize:"12px", fontWeight:"700", color:MUTED, margin:"0 0 10px"},
+      editEv ? "予定を編集" : "新しい予定"));
+
+    // タイトル
+    formWrap.appendChild(span({fontSize:"11px", fontWeight:"700", color:MUTED, marginBottom:"5px", display:"block"},"タイトル"));
+    const titleIn = inp({...S.fIn, marginBottom:"10px"},{type:"text", placeholder:"タイトルを入力"});
+    titleIn.value = form.title;
+    titleIn.addEventListener("input",e=>{ state.form.title=e.target.value; });
+    formWrap.appendChild(titleIn);
+
+    // 期間
+    formWrap.appendChild(span({fontSize:"11px", fontWeight:"700", color:MUTED, marginBottom:"5px", display:"block"},"期間"));
+    const dateRow = div({display:"flex", gap:"6px", marginBottom:"10px", alignItems:"center"});
+    const startIn = inp({...S.fIn, flex:"1", minWidth:"0"},{type:"date"});
+    startIn.value = form.start;
+    startIn.addEventListener("change",e=>{
+      state.form.start=e.target.value;
+      if(state.form.end<e.target.value) state.form.end=e.target.value;
+    });
+    const endIn = inp({...S.fIn, flex:"1", minWidth:"0"},{type:"date"});
+    endIn.value = form.end;
+    endIn.addEventListener("change",e=>{ state.form.end=e.target.value; });
+    dateRow.appendChild(startIn);
+    dateRow.appendChild(span({color:MUTED, fontSize:"12px", flexShrink:"0"},"〜"));
+    dateRow.appendChild(endIn);
+    formWrap.appendChild(dateRow);
+
+    // 終日チェック
+    const allDayLabel = el("label",{style:{display:"flex", alignItems:"center", gap:"8px",
+      fontSize:"13px", fontWeight:"600", color:MUTED, marginBottom:"10px"}});
+    const allDayCb = inp({},{type:"checkbox"});
+    allDayCb.checked = form.allDay;
+    allDayCb.addEventListener("change",e=>{ state.form.allDay=e.target.checked; render(); });
+    allDayLabel.appendChild(allDayCb);
+    allDayLabel.appendChild(document.createTextNode("終日"));
+    formWrap.appendChild(allDayLabel);
+
+    // 時刻
+    if(!form.allDay){
+      formWrap.appendChild(span({fontSize:"11px", fontWeight:"700", color:MUTED, marginBottom:"5px", display:"block"},"時刻"));
+      const timeRow = div({display:"flex", gap:"6px", marginBottom:"10px", alignItems:"center"});
+      const t1In = inp({...S.fIn, flex:"1", minWidth:"0"},{type:"time"});
+      t1In.value = form.t1;
+      t1In.addEventListener("change",e=>{ state.form.t1=e.target.value; });
+      const t2In = inp({...S.fIn, flex:"1", minWidth:"0"},{type:"time"});
+      t2In.value = form.t2;
+      t2In.addEventListener("change",e=>{ state.form.t2=e.target.value; });
+      timeRow.appendChild(t1In);
+      timeRow.appendChild(span({color:MUTED, fontSize:"12px", flexShrink:"0"},"〜"));
+      timeRow.appendChild(t2In);
+      formWrap.appendChild(timeRow);
+    }
+
+    // メモ
+    formWrap.appendChild(span({fontSize:"11px", fontWeight:"700", color:MUTED, marginBottom:"5px", display:"block"},"メモ（任意）"));
+    const memoTa = el("textarea",{style:{...S.fTa, marginBottom:"12px", boxSizing:"border-box"}, placeholder:"メモを入力…"});
+    memoTa.value = form.memo;
+    memoTa.addEventListener("input",e=>{ state.form.memo=e.target.value; });
+    formWrap.appendChild(memoTa);
+
+    // ボタン行
+    const btnRow = div({display:"flex", gap:"8px"});
+    if(editEv&&editEv.user===me){
+      btnRow.appendChild(btn({padding:"12px 18px", borderRadius:"12px", border:`1.5px solid ${BORDER}`,
+        background:"transparent", color:USERS.A.main, fontSize:"13px", fontWeight:"700", cursor:"pointer"},
+        "削除", async ()=>{
+          await deleteEvent(editEv.id);
+          setState({modal:null, editEv:null, addMode:false});
+          showToast("削除しました");
+        }));
+    }
+    btnRow.appendChild(btn({flex:"1", padding:"13px", borderRadius:"12px", border:"none",
+      background:U.main, color:"#fff", fontSize:"14px", fontWeight:"800", cursor:"pointer"},
+      editEv ? "更新する" : "追加する",
+      async ()=>{
+        if(!state.form.title.trim()) return;
+        if(editEv){ await updateEvent(editEv.id, state.form); showToast("更新しました"); }
+        else       { await addEvent(state.form, me);          showToast("追加しました"); }
+        setState({addMode:false, editEv:null});
+      }));
+    formWrap.appendChild(btnRow);
+    sheet.appendChild(formWrap);
+  }
+
+  overlay.appendChild(sheet);
+  return overlay;
+}
+
+// 初回レンダリング
+render();
+</script>
+</body>
+</html>
